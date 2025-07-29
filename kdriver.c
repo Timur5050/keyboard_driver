@@ -16,14 +16,32 @@ MODULE_DEVICE_TABLE(usb, keyboard_logger_table);
 struct keyboard_logger {
   struct usb_device *udev;
   struct usb_interface *interface;
+  struct usb_endpoint_descriptor *ep_desc;
   unsigned char *data;
-  dma_addr_t data_dma;
+  struct urb *urb;
 };
+
+
+static void keyboard_interrupt_handler(struct urb *urb)
+{
+  struct keyboard_logger *dev = urb->context;
+  
+  if(urb->status == 0)
+  {
+    pr_info(DRV_NAME " : data received: %*ph\n", urb->actual_length, dev->data);
+  }
+  else
+  {
+    pr_err(DRV_NAME, " URB error : %d\n", urb->status);
+  }
+
+  usb_submit_urb(urb, GFP_ATOMIC);
+
+}
 
 static int keyboard_logger_probe(struct usb_interface *interface, const struct usb_device_id *id)
 {
   struct usb_device *udev = interface_to_usbdev(interface);
-  struct usb_endpoint_descriptor *ep_desc;
   struct keyboard_logger *dev;
   int maxp;
   
@@ -54,15 +72,49 @@ static int keyboard_logger_probe(struct usb_interface *interface, const struct u
     }
   }
   
+  struct usb_host_interface *iface_desc = dev->interface->cur_altsetting;
+  int i;
   
-  //maxp = usb_maxpacket(udev, usb_rcvintpipe(udev, ep_desc->bEndpointAddress), usb_pipeout(usb_rcvintpipe(udev->bEndpointAddress)));
-   //dev->data = usb_alloc_coherent(udev, maxp, GFP_KERNEL, &dev->data_dma);
+  for(i = 0; i < iface_desc->desc.bNumEndpoints; i++)
+  {
+    struct usb_endpoint_descriptor *endpoint = &iface_desc->endpoint[i].desc;
+
+    if(usb_endpoint_is_int_in(endpoint))
+    {
+      dev->ep_desc = endpoint;
+      break;
+    }
+  }
+
+  dev->data = kmalloc(usb_endpoint_maxp(dev->ep_desc), GFP_KERNEL);
+  if(!dev->data)
+  {
+    goto error_alloc_buff;
+  }
+
+  dev->urb = usb_alloc_urb(0, GFP_KERNEL);
+  if(!dev->urb)
+  {
+    goto error_alloc_urb;
+  }
+
+  usb_fill_int_udb(
+    dev->urb,
+    dev->udev,
+    usb_rcvintpipe(dev->udev, dev->ep_desc->bEndpointAddress),
+    dev->data,
+    usb_endpoint_maxp(dev->ep_desc),
+    keyboard_interrupt_handler,
+    dev,
+    dev->ep_desc->bInterval,
+  );
   
-  //if(!dev->data)
-    //goto error;
-    
-  //dev->urb = usb_alloc_urb(0, GFP_KERNEL);
-  
+  retval = usb_submit_urb(dev->urb, GFP_KERNEL);
+  if(retval)
+  {
+    goto error_submit_urb;
+  }
+
   usb_set_intfdata(interface, udev);
   
   pr_info(DRV_NAME " : device connected sucessfully!\n");
